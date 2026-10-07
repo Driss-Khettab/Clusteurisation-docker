@@ -1,0 +1,22 @@
+meta {
+  name: Me
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/users/me
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{token}}
+}
+
+tests {
+  test("returns current user", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.body.item.email).to.equal(bru.getEnvVar("email"));
+  });
+}

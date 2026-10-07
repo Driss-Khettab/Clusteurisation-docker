@@ -1,0 +1,31 @@
+meta {
+  name: Create address
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/addresses
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{token}}
+}
+
+body:json {
+  {
+    "name": "ESGI",
+    "description": "L'école",
+    "searchWord": "242 rue du Faubourg Saint-Antoine Paris"
+  }
+}
+
+tests {
+  test("address created with coordinates", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.body.item.lat).to.be.a("number");
+    expect(res.body.item.lng).to.be.a("number");
+  });
+}

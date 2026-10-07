@@ -1,0 +1,7 @@
+# Image naïve à une seule étape (point de comparaison, non utilisée)
+FROM node:24-alpine
+WORKDIR /app
+COPY . .
+RUN yarn install --frozen-lockfile
+RUN yarn build
+CMD ["node", "dist/index.js"]

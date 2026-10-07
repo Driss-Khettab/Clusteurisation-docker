@@ -21,6 +21,8 @@ async function startApp() {
     console.error(
       `🚨 unable to connect to db: ${err?.message || JSON.stringify(err)}`,
     );
+    // exit with an error so Docker's restart policy can restart the container
+    process.exit(1);
   }
 }
 
