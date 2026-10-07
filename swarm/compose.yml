@@ -1,0 +1,14 @@
+# Local Docker Swarm cluster: each container runs its own Docker daemon
+# (Docker-in-Docker) and plays the role of a machine.
+# --privileged is required by DinD but breaks isolation: local use only.
+services:
+  manager:
+    image: docker:dind
+    privileged: true
+    hostname: manager
+
+  node:
+    image: docker:dind
+    privileged: true
+    deploy:
+      replicas: 3
