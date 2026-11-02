@@ -1,0 +1,7 @@
+services:
+  hello:
+    image: hello-world
+    deploy:
+      mode: global
+      restart_policy:
+        condition: none

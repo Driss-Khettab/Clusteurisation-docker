@@ -6,9 +6,25 @@ services:
     image: docker:dind
     privileged: true
     hostname: manager
+    ports:
+      - "80:80" # Traefik, reachable from the host
+    volumes:
+      - /home/manager # anonymous volume: keeps the stack files
+    networks:
+      cluster:
+        # workers store the manager's IP when joining: it must survive restarts
+        ipv4_address: 172.28.0.10
 
   node:
     image: docker:dind
     privileged: true
+    networks:
+      - cluster
     deploy:
       replicas: 3
+
+networks:
+  cluster:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

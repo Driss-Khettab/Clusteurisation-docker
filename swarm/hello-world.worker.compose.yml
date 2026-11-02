@@ -1,0 +1,11 @@
+services:
+  hello:
+    image: hello-world
+    deploy:
+      replicas: 3
+      placement:
+        max_replicas_per_node: 1
+        constraints:
+          - node.role == worker
+      restart_policy:
+        condition: none

@@ -1,0 +1,10 @@
+services:
+  hello:
+    image: hello-world
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: none
