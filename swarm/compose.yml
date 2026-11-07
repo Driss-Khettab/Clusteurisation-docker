@@ -6,8 +6,12 @@ services:
     image: docker:dind
     privileged: true
     hostname: manager
+    restart: unless-stopped
+    tmpfs:
+      - /var/run # avoids a stale containerd pid file after a restart
     ports:
       - "80:80" # Traefik, reachable from the host
+      - "443:443"
     volumes:
       - /home/manager # anonymous volume: keeps the stack files
     networks:
@@ -18,6 +22,9 @@ services:
   node:
     image: docker:dind
     privileged: true
+    restart: unless-stopped
+    tmpfs:
+      - /var/run
     networks:
       - cluster
     deploy:

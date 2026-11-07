@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: supersecret
+      POSTGRES_DB: postgres
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  server:
+    image: ghcr.io/driss-khettab/mfp-server:latest
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: supersecret
+      DB_NAME: postgres
+      SESSION_SECRET: change-me-in-production
+    networks:
+      - backend
+      - web
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.mfp-api.rule=Host(`mfp-api.swarm.localhost`)"
+        - "traefik.http.routers.mfp-api.entrypoints=web"
+        - "traefik.http.services.mfp-api.loadbalancer.server.port=3000"
+
+networks:
+  backend:
+  web:
+    external: true
+
+volumes:
+  db-data:

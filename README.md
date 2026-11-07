@@ -1,489 +1,217 @@
 # Clusterisation de conteneurs : My Favorite Places
 
-Ce dépôt regroupe mon travail sur les TD du module *Clusterisation de conteneurs*. Le fil rouge, My Favorite Places, est une petite application composée d'une API Express avec TypeORM (`server/`), d'un client React avec Vite (`client/`) et d'une base PostgreSQL.
+Chaque question des TD est suivie de sa capture.
 
-| Partie | Exercice | Sujet |
-|---|---|---|
-| Introduction | [TD 1](#intro-td-1--dockerisation) | Dockeriser le projet |
-| Introduction | [TD 2](#intro-td-2--optimisation) | Ordre de démarrage, redémarrage, taille des images |
-| Docker Swarm | [TD 1](#swarm-td-1--dind-et-dood) | Docker-in-Docker et Docker-out-of-Docker |
-| Docker Swarm | [Prérequis](#swarm-prérequis--images-sur-un-registry) | Publier les images sur un registry |
-| Docker Swarm | [TD 2](#swarm-td-2--création-du-cluster) | Créer le cluster |
-| Docker Swarm | [TD 3](#swarm-td-3--tests-du-cluster) | Tester le cluster |
-| Traefik | [Exercice 1](#traefik-exercice-1--déployer-traefik) | Déployer Traefik |
-| Traefik | [Exercice 2](#traefik-exercice-2--déployer-une-autre-application) | Déployer une autre application |
-
-## Lancer le projet
-
-```bash
-# l'application : front sur http://localhost:8080, API sur http://localhost:3000/api
-docker compose up -d --build
-
-# le cluster Swarm local (init et join sont détaillés dans le TD 2 Swarm)
-cd swarm && docker compose up -d
-```
-
-La collection Bruno se trouve dans `bruno/`. Elle a deux environnements : `local` pour appeler l'API directement, et `front` pour passer par Nginx.
-
----
-
-## Intro, TD 1 : dockerisation
-
-### 1. Tester le serveur avec `yarn dev` et Bruno
-
-Pour tourner, `yarn dev` a besoin d'un PostgreSQL sur `localhost:5432`. J'en ai donc lancé un dans un conteneur temporaire.
-
-```bash
-docker run -d --name mfp-pg-tmp -e POSTGRES_PASSWORD=supersecret -p 5432:5432 postgres:17-alpine
-cd server
-yarn dev
-```
-
-![yarn dev : le serveur est connecté à la BDD et démarre sur le port 3000](docs/screens/01-yarn-dev.png)
-
-Ensuite, j'ai créé un compte depuis Bruno, et l'API répond bien `200 OK` :
-
-![Bruno : création d'un utilisateur](docs/screens/02-bruno-local.png)
-
-### 2. Dockeriser le serveur
-
-J'ai d'abord dû modifier `server/src/datasource.ts` pour qu'il lise la configuration de la BDD dans des variables d'environnement (`DB_HOST`, etc.). Sinon, une fois dans son conteneur, le serveur chercherait la BDD sur `localhost`, c'est-à-dire chez lui.
-
-```bash
-cd server
-docker build -t mfp-server .
-docker run -d --name mfp-server-tmp -p 3000:3000 -e DB_HOST=host.docker.internal mfp-server
-docker ps
-```
-
-![docker ps : le serveur tourne depuis son image](docs/screens/03-docker-ps.png)
-
-La connexion depuis Bruno fonctionne aussi sur le serveur conteneurisé : j'obtiens un `200 OK` et un token.
-
-![Bruno : connexion sur le serveur Docker](docs/screens/03-bruno-docker.png)
-
-### 3. `compose.yml` : serveur et BDD
-
-```bash
-docker compose up -d --build db server
-docker compose ps
-```
-
-![docker compose : db healthy, puis server démarré](docs/screens/04-compose-server-bdd.png)
-
-### 4. Client React
-
-J'ai commencé par le tester en développement. Le proxy Vite se charge d'envoyer `/api` vers `localhost:3000`.
-
-```bash
-cd client
-yarn dev
-```
-
-![yarn dev du client](docs/screens/05-client-cli.png)
-
-![Le site sur localhost:5173](docs/screens/05-client-web.png)
-
-Pour le dockeriser, Vite construit l'application, puis Nginx sert les fichiers. `client/nginx.conf` envoie `/api/` vers `http://server:3000` et renvoie toutes les autres routes vers `index.html`, pour que react-router fonctionne.
-
-```bash
-docker compose up -d --build
-docker compose ps
-```
-
-![Les 3 services dans Compose et le site sur localhost:8080](docs/screens/06-compose-complet.png)
-
-### 5. Comment communiquent les services ?
-
-```mermaid
-flowchart LR
-    B[Navigateur<br/>exécute le code React]
-    BR[Bruno]
-    subgraph R[Réseau Docker Compose]
-        C[client : Nginx]
-        S[server : Express]
-        D[(db : PostgreSQL)]
-    end
-    B -- "localhost:8080" --> C
-    BR -- "localhost:3000" --> S
-    C -- "HTTP /api/ vers server:3000" --> S
-    S -- "SQL vers db:5432" --> D
-```
-
-**Entre la BDD et le serveur :** Compose crée un réseau commun avec un DNS interne, où chaque nom de service sert de nom d'hôte. Le serveur joint donc la base sur `db:5432`, avec le protocole PostgreSQL. Comme le port 5432 n'est pas publié, la BDD n'est accessible que depuis ce réseau.
-
-**Entre le serveur et le front :** le code React s'exécute dans le navigateur et non dans le conteneur, et le navigateur ne connaît pas le nom `server`. Le front appelle donc des URLs relatives (`/api/...`) sur `localhost:8080`, puis Nginx les transmet à `server:3000`. Comme la page et l'API ont la même origine, il n'y a pas de souci de CORS.
-
----
-
-## Intro, TD 2 : optimisation
-
-### 1. Démarrer le serveur une fois la BDD prête
-
-J'ai ajouté un healthcheck à `db`, et `server` attend qu'il passe au vert. Sans `condition: service_healthy`, Compose attendrait seulement que le conteneur soit lancé, alors que PostgreSQL met quelques secondes à accepter des connexions.
-
-```yaml
-db:
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
-    interval: 5s
-    timeout: 5s
-    retries: 10
-server:
-  depends_on:
-    db:
-      condition: service_healthy
-```
-
-### 2. Redémarrage automatique, sauf arrêt manuel
-
-Les 3 services ont `restart: unless-stopped`.
-
-J'ai aussi modifié `server/src/index.ts` pour qu'il quitte avec `process.exit(1)` si la connexion à la BDD échoue. Avant, le serveur affichait l'erreur mais restait vivant sans rien servir, et Docker n'avait donc aucune raison de le relancer.
-
-Pour vérifier, j'ai fait deux tests :
-
-| Test | Résultat |
+| Cours | Exercices |
 |---|---|
-| `kill -9` du processus du serveur | Il redémarre seul (`RestartCount` à 1, statut `running`) |
-| `docker compose stop server` | Il reste arrêté (`exited`) |
-
-### 3. Build stages
-
-Un Dockerfile multi-stage enchaîne plusieurs `FROM`. Une étape peut récupérer des fichiers d'une étape précédente avec `COPY --from=...`, et seule la dernière donne l'image finale. Les outils de build ne se retrouvent donc pas en production.
-
-`server/Dockerfile` a 4 étapes :
-
-1. `base` : `node:24-alpine`, `package.json` et `yarn.lock`.
-2. `build` : toutes les dépendances, et la compilation du TypeScript vers `dist/`.
-3. `prod-deps` : uniquement les dépendances de production.
-4. `runtime` : le `node_modules` de production et `dist/`, exécutés avec l'utilisateur `node`.
-
-Un détail m'a pris du temps : `yarn install --production` (yarn v1) gardait `typescript` et `ts-node`, soit environ 25 Mo, parce que `ts-node` est aussi une dépendance optionnelle de `typeorm`. L'étape `prod-deps` retire donc les devDependencies du `package.json` avant l'installation, et `yarn.lock` garantit qu'on garde les mêmes versions.
-
-```bash
-docker build -f server/Dockerfile.naive -t mfp-server:naive server
-docker build -t mfp-server:optimized server
-docker images mfp-server
-```
-
-![Tailles : 314 Mo pour l'image naive, 200 Mo pour l'image optimisée](docs/screens/07-tailles-images.png)
-
-Pour mesurer le gain, j'ai comparé avec une image à une seule étape, écrite exprès (`server/Dockerfile.naive`) : on passe de 314 Mo à 200 Mo, soit 114 Mo de moins.
+| [1 - Introduction](#1---introduction) | TD 1, TD 2 |
+| [2 - Docker Swarm](#2---docker-swarm) | TD 1, prérequis, TD 2, TD 3 |
+| [4 - Traefik et Portainer](#4---traefik-et-portainer) | Exercices 1 à 4 |
+| [5 - Secrets et configs](#5---secrets-et-configs) | Exercice 1 |
 
 ---
 
-## Swarm, TD 1 : DinD et DooD
+## 1 - Introduction
 
-| | Docker-in-Docker (DinD) | Docker-out-of-Docker (DooD) |
-|---|---|---|
-| Principe | Un daemon Docker complet tourne dans le conteneur (`docker:dind`) | Le conteneur utilise le daemon de l'hôte via `/var/run/docker.sock` |
-| Conteneurs lancés | Enfants du conteneur, invisibles depuis l'hôte | Frères du conteneur, créés sur l'hôte |
-| Isolation | Daemon, images et conteneurs séparés de l'hôte | Aucune, tout est partagé avec l'hôte |
-| Sécurité | Exige `--privileged`, à réserver au local | L'accès au socket donne le contrôle de l'hôte |
-| Cache d'images | Propre à chaque conteneur | Partagé avec l'hôte |
+### TD 1 : dockerisation du projet
 
-Pour tester Swarm, c'est DinD qu'il nous faut. Chaque conteneur a son propre daemon, donc il se comporte comme un serveur à part. Avec DooD, tout le monde partage le même daemon, et on ne pourrait pas simuler plusieurs machines.
+**1. Tester le serveur avec `yarn dev` et faire une requête avec Bruno**
 
-L'idée est donc de lancer 4 conteneurs DinD sur un même réseau avec un `compose.yml`. Le manager fait `docker swarm init`, puis les nodes font `docker swarm join`.
+![](docs/screens/01-yarn-dev.png)
 
----
+![](docs/screens/02-bruno-local.png)
 
-## Swarm, prérequis : images sur un registry
+**2. Dockeriser le serveur et retester avec Bruno**
 
-J'ai publié les images sur GitHub Container Registry, en public. Pour vérifier, je les ai téléchargées depuis un node du cluster, sans identifiants.
+![](docs/screens/03-docker-ps.png)
 
-```bash
-docker tag esgi-2603-my-favorite-places-server ghcr.io/driss-khettab/mfp-server:latest
-docker tag esgi-2603-my-favorite-places-client ghcr.io/driss-khettab/mfp-client:latest
-docker login ghcr.io -u Driss-Khettab
-docker push ghcr.io/driss-khettab/mfp-server:latest
-docker push ghcr.io/driss-khettab/mfp-client:latest
-```
+![](docs/screens/03-bruno-docker.png)
 
-![Les images mfp-server et mfp-client sur GitHub Packages](docs/screens/08-images-ghcr.png)
+**3. `compose.yml` qui lance le serveur et une BDD PostgreSQL**
 
----
+![](docs/screens/04-compose-server-bdd.png)
 
-## Swarm, TD 2 : création du cluster
+**4. Tester le client React, le dockeriser et l'ajouter au `compose.yml`**
 
-Tout se passe dans le dossier `swarm/`.
+![](docs/screens/05-client-cli.png)
 
-### 1. Lancer les conteneurs DinD
+![](docs/screens/05-client-web.png)
 
-```yaml
-# swarm/compose.yml
-services:
-  manager:
-    image: docker:dind
-    privileged: true
-    hostname: manager
-    ports:
-      - "80:80" # ajouté pour Traefik
-    volumes:
-      - /home/manager
-    networks:
-      cluster:
-        ipv4_address: 172.28.0.10
+![](docs/screens/06-compose-complet.png)
 
-  node:
-    image: docker:dind
-    privileged: true
-    networks:
-      - cluster
-    deploy:
-      replicas: 3
+**5. Comment communiquent la BDD et le serveur ? Le serveur et le front ?**
 
-networks:
-  cluster:
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24
-```
+- BDD et serveur : par le réseau Docker de Compose, le serveur joint la base avec le nom du service, `db:5432`.
+- Serveur et front : le navigateur appelle `/api` sur le front, et Nginx transmet la requête à `server:3000`.
 
-```bash
-docker compose up -d
-docker ps
-docker exec -it swarm-node-1 ash
-docker ps    # dans le conteneur
-```
+### TD 2
 
-Dans le node, `docker ps` est vide alors que mon Mac fait tourner plusieurs conteneurs.
+**1. Démarrer le serveur une fois la BDD prête**
 
-![Les 4 conteneurs DinD, puis docker ps vide dans un node](docs/screens/09-dind-conteneurs.png)
+`healthcheck` sur `db` et `depends_on: condition: service_healthy` sur `server` : `db` passe `Healthy`, puis `server` démarre.
 
-### 2. Initialiser le cluster
+![](docs/screens/04-compose-server-bdd.png)
 
-```bash
-docker exec swarm-manager-1 docker swarm init
-# Swarm initialized: current node (...) is now a manager.
-```
+**2. Redémarrage automatique, sauf arrêt manuel**
 
-La commande affiche le token à donner aux workers. On peut le retrouver plus tard avec `docker swarm join-token -q worker`.
+`restart: unless-stopped` sur les 3 services de `compose.yml`.
 
-### 3. Faire rejoindre les nodes
+**3. Build stages et image du serveur allégée d'environ 100 Mo**
 
-Comme demandé, j'utilise le nom du service Compose, `manager:2377`, et non l'IP du manager.
-
-```bash
-docker exec swarm-node-1 docker swarm join --token <TOKEN> manager:2377
-docker exec swarm-node-2 docker swarm join --token <TOKEN> manager:2377
-docker exec swarm-node-3 docker swarm join --token <TOKEN> manager:2377
-```
-
-### 4. Lister les nœuds depuis le manager
-
-```bash
-docker exec swarm-manager-1 docker node ls
-```
-
-![Les 3 workers rejoignent le cluster, puis les 4 nœuds sont Ready](docs/screens/10-swarm-cluster.png)
-
-Les workers s'affichent avec l'ID de leur conteneur, car les réplicas d'un même service ne peuvent pas avoir chacun leur `hostname`. Sur un worker, `docker node ls` est refusée : seul un manager voit l'état du cluster.
-
-### Pourquoi une IP fixe pour le manager
-
-Je pensais que passer par le nom `manager` suffisait à éviter les soucis d'IP, mais ce nom n'est lu qu'au moment du `join`. Ensuite, chaque worker garde l'IP en mémoire. Après un redémarrage de Docker, le manager avait changé d'IP et les 3 workers restaient `Down`.
-
-Je lui ai donc donné l'IP fixe `172.28.0.10`, et les 4 nœuds repassent `Ready` après un `docker compose restart`.
-
-### Test : arrêter un worker
-
-```bash
-docker stop swarm-node-1
-docker exec swarm-manager-1 docker node ls
-docker start swarm-node-1
-docker exec swarm-manager-1 docker node ls
-```
-
-Le manager voit le worker passer `Down` quand je l'arrête, puis `Ready` une fois relancé.
-
-![Un worker passe Down à l'arrêt, puis Ready au redémarrage](docs/screens/13-node-down.png)
+![](docs/screens/07-tailles-images.png)
 
 ---
 
-## Swarm, TD 3 : tests du cluster
+## 2 - Docker Swarm
 
-### 1. La stack
+### TD 1 : DinD et DooD
 
-```yaml
-# swarm/hello-world.compose.yml
-services:
-  hello:
-    image: hello-world
-    deploy:
-      replicas: 2
-```
+DinD fait tourner un daemon Docker complet dans un conteneur, DooD réutilise celui de l'hôte. Pour tester Swarm, chaque nœud est un conteneur DinD : chacun a son propre daemon, comme une machine séparée.
 
-### 2. Copier la stack sur le manager et la déployer
+### Prérequis : images front et back sur un registry
 
-`/home/manager` est un volume anonyme (voir `swarm/compose.yml`), donc les fichiers restent après un redémarrage.
+![](docs/screens/08-images-ghcr.png)
 
-```bash
-docker exec swarm-manager-1 mkdir -p /home/manager
-docker cp hello-world.compose.yml swarm-manager-1:/home/manager/
-docker exec swarm-manager-1 ls -l /home/manager
-docker exec swarm-manager-1 docker stack deploy -c /home/manager/hello-world.compose.yml hello
-```
+### TD 2 : création du cluster
 
-![La stack copiée dans /home/manager puis déployée](docs/screens/11-stack-deploy.png)
+**1. `compose.yml` avec 1 manager et 3 nodes DinD, `docker ps` dans un conteneur**
 
-### 3. Observer le déploiement
+![](docs/screens/09-dind-conteneurs.png)
 
-```bash
-docker exec swarm-manager-1 docker service ls
-docker exec swarm-manager-1 docker ps -a
-docker exec swarm-node-1 docker ps -a
-docker exec swarm-node-2 docker ps -a
-docker exec swarm-node-3 docker ps -a
-```
+**2. Initialiser le cluster sur le manager**
 
-![docker service ls, puis docker ps -a sur chaque machine](docs/screens/12-service-ls-ps.png)
+**3. Faire rejoindre les nodes**
 
-| Machine | Conteneurs dans `docker ps -a` |
-|---|---|
-| manager | 4 |
-| node-1 | 2 |
-| node-2 | 3 |
-| node-3 | 1 |
+**4. Lister les nœuds depuis le manager**
 
-**Ce que j'en déduis :**
+![](docs/screens/10-swarm-cluster.png)
 
-- **Le `0/2` n'est pas une panne.** `hello-world` affiche son message puis s'arrête (`Exited (0)`). Par défaut, Swarm recrée tout conteneur arrêté (`restart_policy: any`), donc le service tourne en boucle sans jamais rester actif.
-- **C'est Swarm qui choisit les machines.** Je demande 2 réplicas sans dire où, et chaque nouveau conteneur peut atterrir ailleurs. Ici, les 4 machines en ont exécuté, y compris le manager, qui accepte aussi des conteneurs par défaut.
-- **Chaque machine ne voit que ses propres conteneurs.** `docker ps` reste local. Pour avoir la vue d'ensemble, il faut passer par le manager, avec `docker service ls` et `docker service ps`.
+### TD 3 : tests du cluster
 
-### 4. Faire varier `deploy`
+**1. Stack `hello-world.compose.yml` avec 2 réplicas**
 
-Sur ces variantes, j'ai ajouté `restart_policy: none` pour que chaque conteneur ne s'exécute qu'une fois. Sans ça, la boucle rend le résultat difficile à lire.
+**2. Copier la stack dans `/home/manager` sur le manager**
 
-| Fichier dans `swarm/` | Clause `deploy` | Résultat (`docker service ps`) |
-|---|---|---|
-| `hello-world.manager.compose.yml` | `replicas: 2`, `constraints: [node.role == manager]` | Les 2 réplicas sur `manager` |
-| `hello-world.global.compose.yml` | `mode: global` | 1 conteneur sur chacun des 4 nœuds |
-| `hello-world.worker.compose.yml` | `replicas: 3`, `max_replicas_per_node: 1`, `constraints: [node.role == worker]` | 1 conteneur sur chacun des 3 workers, aucun sur le manager |
+![](docs/screens/11-stack-deploy.png)
 
-En mode `global`, on n'indique pas de nombre de réplicas : Swarm en lance un par nœud.
+**3. `docker service ls` et `docker ps` sur chaque nœud : qu'en déduisez-vous ?**
+
+![](docs/screens/12-service-ls-ps.png)
+
+Swarm répartit les conteneurs sur les nœuds. Chaque nœud ne voit que les siens, et seul le manager a la vue d'ensemble. `hello-world` s'arrête aussitôt, donc Swarm le relance en boucle.
+
+**4. Faire varier `deploy` : manager seulement, puis global**
+
+Fichiers `swarm/hello-world.manager.compose.yml` et `swarm/hello-world.global.compose.yml`.
 
 ---
 
-## Traefik, exercice 1 : déployer Traefik
+## 4 - Traefik et Portainer
 
-Un reverse proxy écoute sur les ports 80 et 443, regarde quel nom de domaine est demandé et transmet la requête à la bonne application. Ce qui est pratique avec Traefik, c'est que chaque service se déclare lui-même avec des labels : il n'y a pas de configuration centrale à modifier.
+### Exercice 1 : déployer Traefik
 
-### 1. Infrastructure Swarm
+**1. Relancer le cluster Swarm**
 
-Je repars du cluster de 4 nœuds, en publiant le port 80 du manager (voir `swarm/compose.yml`) pour pouvoir joindre Traefik depuis ma machine.
+**2. Déployer la stack sur le manager, avec le réseau `web` en overlay**
+
+![](docs/screens/15-traefik-stack.png)
+
+**3. Fichier hosts : `traefik.swarm.localhost` et `whoami.swarm.localhost`**
+
+![](docs/screens/14-hosts.png)
+
+![](docs/screens/16-traefik-dashboard.png)
+
+![](docs/screens/17-whoami.png)
+
+### Exercice 2 : déployer une autre application
+
+**1. Tester l'application avec Docker Compose**
+
+![](docs/screens/18-vote-compose.png)
+
+**2. La déployer sur Swarm**
+
+![](docs/screens/19-vote-stack.png)
+
+**3. Vote et résultats sur 2 URLs**
+
+![](docs/screens/20-vote-url.png)
+
+![](docs/screens/21-result-url.png)
+
+### Exercice 3 : déployer Portainer
+
+**1. Déployer Portainer sur Swarm**
+
+![](docs/screens/23-portainer-stack.png)
+
+**2. Publier Portainer sur une URL avec des labels**
+
+**3. Mettre à jour le fichier hosts et retrouver ses stacks**
+
+![](docs/screens/22-hosts-portainer.png)
+
+![](docs/screens/24-portainer-environnement.png)
+
+![](docs/screens/25-portainer-stacks.png)
+
+### Exercice 4 : redéployer l'app de vote
+
+**1. Supprimer la stack de vote**
 
 ```bash
-cd swarm
-docker compose up -d
+docker exec swarm-manager-1 docker stack rm vote
 ```
 
-### 2. Déployer la stack
+**2. La republier depuis Portainer**
 
-`swarm/traefik.yml` est la stack fournie par le cours. Le réseau `web` est de type `overlay`, ce qui lui permet de relier des conteneurs situés sur des nœuds différents. Comme la stack le déclare `external`, il faut le créer avant de déployer.
+![](docs/screens/26-vote-portainer.png)
 
-```bash
-docker exec swarm-manager-1 docker network create -d overlay web
-docker cp traefik.yml swarm-manager-1:/home/manager/
-docker exec swarm-manager-1 docker stack deploy -c /home/manager/traefik.yml traefik
-docker exec swarm-manager-1 docker stack services traefik
-```
+**3. Vérifier dans le navigateur**
 
-![Les services traefik et whoami en 1/1](docs/screens/15-traefik-stack.png)
+![](docs/screens/27-vote-url.png)
 
-### 3. Fichier hosts
+![](docs/screens/28-result-url.png)
 
-Aucun nom de domaine public ne pointe vers ma machine. Le fichier `hosts` sert donc de mini-DNS local, et il est consulté en priorité.
+**4. Nouvelle stack pour l'API MFP, testée avec Bruno**
 
-```bash
-echo "127.0.0.1 traefik.swarm.localhost whoami.swarm.localhost vote.swarm.localhost result.swarm.localhost" | sudo tee -a /etc/hosts
-```
+![](docs/screens/29-mfp-portainer.png)
 
-![La ligne ajoutée au fichier hosts](docs/screens/14-hosts.png)
+![](docs/screens/31-mfp-bruno-me.png)
 
-Le dashboard de Traefik et `whoami` s'ouvrent ensuite dans le navigateur :
-
-![Le dashboard de Traefik sur traefik.swarm.localhost](docs/screens/16-traefik-dashboard.png)
-
-![whoami répond sur whoami.swarm.localhost](docs/screens/17-whoami.png)
-
-`whoami` tourne sur un worker alors que Traefik est sur le manager : la requête passe de l'un à l'autre par le réseau overlay `web`.
+![](docs/screens/30-mfp-bruno-address.png)
 
 ---
 
-## Traefik, exercice 2 : déployer une autre application
+## 5 - Secrets et configs
 
-### 1. Tester l'application avec Docker Compose
+### Exercice 1 : déployer des logiciels
 
-Il s'agit d'[example-voting-app](https://github.com/dockersamples/example-voting-app).
+**1. Dozzle avec un utilisateur en secret (`users.yml`), sur `dozzle.swarm.localhost`**
 
-```bash
-git clone https://github.com/dockersamples/example-voting-app
-cd example-voting-app
-docker compose up -d --build
-```
+![](docs/screens/32-hosts-dozzle-authelia.png)
 
-Le vote est sur `localhost:8080` et les résultats sur `localhost:8081` :
+![](docs/screens/33-portainer-secrets.png)
 
-![La page de résultats sur localhost:8081](docs/screens/18-vote-compose.png)
+![](docs/screens/34-dozzle-stack.png)
 
-```mermaid
-flowchart LR
-    U[Navigateur]
-    U --> V[vote : page de vote]
-    V --> R[(redis : file d'attente des votes)]
-    R --> W[worker : traite les votes]
-    W --> D[(db : PostgreSQL)]
-    D --> RE[result : page de résultats]
-    RE --> U
-```
+![](docs/screens/35-dozzle-login-simple.png)
 
-Le vote et les résultats ne se parlent jamais directement. `vote` dépose le vote dans Redis, `worker` le récupère et l'enregistre en base, et `result` lit la base.
+![](docs/screens/36-dozzle-simple-connecte.png)
 
-### 2. Déployer sur Swarm
+**2. Authelia avec un compte en secret, et connexion à Dozzle en OIDC**
 
-`swarm/voting-app.yml` reprend le `docker-stack.yml` fourni par le projet, qui publie les ports 8080 et 8081.
+![](docs/screens/37-authelia-stack.png)
 
-```bash
-docker cp voting-app.yml swarm-manager-1:/home/manager/
-docker exec swarm-manager-1 docker stack deploy -c /home/manager/voting-app.yml vote
-docker exec swarm-manager-1 docker stack ps vote --filter desired-state=running
-```
+![](docs/screens/38-dozzle-login-oidc.png)
 
-Swarm répartit bien les services sur plusieurs nœuds :
+![](docs/screens/39-authelia-login.png)
 
-![Une partie des conteneurs de la stack vote et leur nœud](docs/screens/19-vote-stack.png)
+![](docs/screens/40-dozzle-oidc-hotes.png)
 
-### 3. Exposer les deux applications avec Traefik
+![](docs/screens/41-dozzle-oidc-conteneurs.png)
 
-Dans `swarm/voting-app.traefik.yml`, j'ai retiré les ports publiés, ajouté `vote` et `result` au réseau `web`, et déclaré les deux services avec des labels, sur le modèle de `whoami` :
+**3. Bonus : Outline**
 
-```yaml
-vote:
-  image: dockersamples/examplevotingapp_vote
-  networks:
-    - frontend
-    - web
-  deploy:
-    replicas: 2
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.vote.rule=Host(`vote.swarm.localhost`)"
-      - "traefik.http.routers.vote.entrypoints=web"
-      - "traefik.http.services.vote.loadbalancer.server.port=80"
-```
-
-`result` suit le même modèle, avec `result.swarm.localhost`. Les deux noms sont déjà dans le fichier `hosts`.
-
-```bash
-docker cp voting-app.traefik.yml swarm-manager-1:/home/manager/
-docker exec swarm-manager-1 docker stack deploy -c /home/manager/voting-app.traefik.yml vote
-```
-
-![La page de vote sur vote.swarm.localhost](docs/screens/20-vote-url.png)
-
-![La page de résultats sur result.swarm.localhost](docs/screens/21-result-url.png)
-
-Les 23 votes affichés comprennent des votes de test envoyés avec `curl`. J'ai aussi vérifié le chemin complet : les votes envoyés à `vote.swarm.localhost` arrivent bien dans la table `votes` de PostgreSQL.
+Non réalisé.

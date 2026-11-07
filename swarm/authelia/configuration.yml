@@ -1,0 +1,56 @@
+server:
+  address: 'tcp://:9091'
+
+log:
+  level: info
+
+authentication_backend:
+  password_reset:
+    disable: true
+  file:
+    path: /run/secrets/authelia_users
+
+access_control:
+  default_policy: one_factor
+
+session:
+  cookies:
+    - domain: 'swarm.localhost'
+      authelia_url: 'https://authelia.swarm.localhost'
+
+storage:
+  local:
+    path: /data/db.sqlite3
+
+notifier:
+  filesystem:
+    filename: /data/notification.txt
+
+definitions:
+  user_attributes:
+    dozzle_roles:
+      expression: '"dozzle-admins" in groups ? ["all"] : []'
+
+identity_providers:
+  oidc:
+    jwks:
+      - key: {{ secret "/run/secrets/authelia_jwks" | mindent 10 "|" | msquote }}
+    claims_policies:
+      dozzle:
+        id_token: ['dozzle_roles']
+        custom_claims:
+          dozzle_roles: {}
+    scopes:
+      dozzle_roles:
+        claims: ['dozzle_roles']
+    clients:
+      - client_id: 'dozzle'
+        client_name: 'Dozzle'
+        client_secret: '$pbkdf2-sha512$310000$5XfQX2EWsU.ET8ZtFHVuDA$CMXHciV.Xt0aSE7.93hzGofh93ct0CRGhIvBHzy8tYohWoJ6BYcmb6nrw/6xZtXJrh7M2mVZ0FaIsBz6Tp8epw'
+        public: false
+        authorization_policy: 'one_factor'
+        consent_mode: 'implicit'
+        redirect_uris:
+          - 'https://dozzle.swarm.localhost/api/auth/callback'
+        scopes: ['openid', 'profile', 'email', 'dozzle_roles']
+        claims_policy: 'dozzle'

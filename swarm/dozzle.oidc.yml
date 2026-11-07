@@ -1,0 +1,49 @@
+services:
+  dozzle:
+    image: ghcr.io/amir20/dozzle:latest
+    environment:
+      DOZZLE_MODE: swarm
+      DOZZLE_AUTH_PROVIDER: oidc
+      DOZZLE_AUTH_OIDC_ISSUER: https://authelia.swarm.localhost
+      DOZZLE_AUTH_OIDC_CLIENT_ID: dozzle
+      DOZZLE_AUTH_OIDC_CLIENT_SECRET_FILE: /run/secrets/dozzle_oidc_client_secret
+      DOZZLE_AUTH_OIDC_SCOPES: dozzle_roles
+      # trust the local CA that signed Authelia's certificate
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dozzle-data:/data
+    configs:
+      - source: swarm_ca
+        target: /certs/ca.crt
+    secrets:
+      - dozzle_oidc_client_secret
+    networks:
+      - dozzle
+      - web
+    deploy:
+      mode: global
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.dozzle.rule=Host(`dozzle.swarm.localhost`)"
+        - "traefik.http.routers.dozzle.entrypoints=websecure"
+        - "traefik.http.routers.dozzle.tls=true"
+        - "traefik.http.services.dozzle.loadbalancer.server.port=8080"
+        - "traefik.http.services.dozzle.loadbalancer.sticky.cookie=true"
+
+networks:
+  dozzle:
+    driver: overlay
+  web:
+    external: true
+
+volumes:
+  dozzle-data:
+
+configs:
+  swarm_ca:
+    file: ./secrets/ca.crt
+
+secrets:
+  dozzle_oidc_client_secret:
+    external: true
